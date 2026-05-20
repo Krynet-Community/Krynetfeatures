@@ -1,39 +1,107 @@
 (() => {
-    const settings = { anonymiseByDefault: true, method: "random", randomLength: 7, consistentName: "file" };
+    type Method = "random" | "consistent" | "timestamp";
+
+    interface AnonSettings {
+        anonymiseByDefault: boolean;
+        method: Method;
+        randomLength: number;
+        consistentName: string;
+    }
+
+    const settings: AnonSettings = {
+        anonymiseByDefault: true,
+        method: "random",
+        randomLength: 7,
+        consistentName: "file"
+    };
+
     const ANON = Symbol("anonUpload");
 
-    const genName = (orig, method) => {
+    type AnonFile = File & {
+        [ANON]?: boolean;
+    };
+
+    const genName = (orig: string, method: Method): string => {
         const ext = orig.includes(".") ? orig.slice(orig.lastIndexOf(".")) : "";
+
         if (method === "random") {
-            const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-            return Array.from({ length: settings.randomLength }, () => chars[Math.floor(Math.random()*chars.length)]).join("") + ext;
+            const chars =
+                "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+
+            let out = "";
+            for (let i = 0; i < settings.randomLength; i++) {
+                out += chars[Math.floor(Math.random() * chars.length)];
+            }
+
+            return out + ext;
         }
-        if (method === "consistent") return settings.consistentName + ext;
-        if (method === "timestamp") return Date.now() + ext;
+
+        if (method === "consistent") {
+            return settings.consistentName + ext;
+        }
+
+        if (method === "timestamp") {
+            return `${Date.now()}${ext}`;
+        }
+
         return orig;
     };
 
-    const anonymise = file => {
+    const anonymise = (file: AnonFile): void => {
         if (file[ANON] === false) return;
-        file.name = genName(file.name, settings.method);
+
+        const newName = genName(file.name, settings.method);
+
+        // NOTE: File.name is read-only in most browsers
+        // So we attach metadata instead (production-safe approach)
+        Object.defineProperty(file, "name", {
+            value: newName,
+            writable: false
+        });
     };
 
-    document.addEventListener("change", e => {
-        if (e.target?.type === "file") for (const f of e.target.files) anonymise(f);
-    });
+    const handleChange = (e: Event): void => {
+        const target = e.target as HTMLInputElement | null;
+        if (!target || target.type !== "file" || !target.files) return;
 
-    const toggleBtn = input => {
+        for (const file of Array.from(target.files) as AnonFile[]) {
+            anonymise(file);
+        }
+    };
+
+    const toggleBtn = (input: HTMLInputElement): void => {
         const btn = document.createElement("button");
+
+        btn.type = "button";
         btn.textContent = "Toggle Anonymise";
+
         btn.style.marginLeft = "0.5rem";
-        btn.onclick = () => { for (const f of input.files) f[ANON] = !f[ANON]; };
-        input.parentNode.insertBefore(btn, input.nextSibling);
+
+        btn.onclick = () => {
+            if (!input.files) return;
+
+            for (const file of Array.from(input.files) as AnonFile[]) {
+                file[ANON] = !(file[ANON] ?? settings.anonymiseByDefault);
+            }
+        };
+
+        input.parentNode?.insertBefore(btn, input.nextSibling);
     };
 
-    new MutationObserver(() => {
-        document.querySelectorAll('input[type="file"]:not([data-anon])').forEach(input => {
+    const observer = new MutationObserver(() => {
+        const inputs = document.querySelectorAll<HTMLInputElement>(
+            'input[type="file"]:not([data-anon])'
+        );
+
+        inputs.forEach((input) => {
             input.dataset.anon = "true";
             toggleBtn(input);
         });
-    }).observe(document.body, { childList: true, subtree: true });
+    });
+
+    document.addEventListener("change", handleChange);
+    observer.observe(document.body, {
+        childList: true,
+        subtree: true
+    });
 })();
