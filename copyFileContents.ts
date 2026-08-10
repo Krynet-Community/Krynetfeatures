@@ -6,115 +6,390 @@ type CopyFileLike = {
 };
 
 class KrynetCopyFile {
-    static MAX_COPY_SIZE = 500_000; // 500KB
+    static readonly MAX_COPY_SIZE = 500_000;
+
+    private static readonly TEXT_EXTENSIONS =
+        /\.(txt|md|markdown|json|js|jsx|ts|tsx|html|htm|css|scss|sass|less|xml|csv|log|yaml|yml|toml|ini|conf|sh|bash|py|java|c|cpp|h|hpp|rs|go|php|rb|swift|kt|sql)$/i;
+
+    private static readonly TOAST_DURATION = 2000;
+
+    private static toastElement: HTMLElement | null = null;
+    private static toastTimer:
+        ReturnType<typeof setTimeout> | null = null;
+    private static fadeTimer:
+        ReturnType<typeof setTimeout> | null = null;
+
+    /* ---------------------------------------------------------
+       FILE DETECTION
+    --------------------------------------------------------- */
 
     /**
-     * Checks if a file is a text-based file type.
+     * Returns true when the file appears to contain text.
      */
-    static isTextFile(file: CopyFileLike): boolean {
-        return (
-            file.type?.startsWith("text/") ??
-            /\.(txt|md|json|js|ts|html|css|log)$/i.test(file.name)
+    static isTextFile(
+        file: CopyFileLike
+    ): boolean {
+        const mimeType =
+            file.type?.toLowerCase() ?? "";
+
+        if (mimeType.startsWith("text/")) {
+            return true;
+        }
+
+        // Common application/* types that are still text.
+        const textMimeTypes = new Set([
+            "application/json",
+            "application/javascript",
+            "application/typescript",
+            "application/xml",
+            "application/x-yaml",
+            "application/yaml",
+            "application/sql"
+        ]);
+
+        if (textMimeTypes.has(mimeType)) {
+            return true;
+        }
+
+        return this.TEXT_EXTENSIONS.test(
+            file.name
         );
     }
 
+    /* ---------------------------------------------------------
+       SIZE CHECK
+    --------------------------------------------------------- */
+
     /**
-     * Creates a copy button for a file element.
+     * Checks both declared file size and actual content size.
      */
-    static createButton(file: CopyFileLike): HTMLElement | null {
-        if (!this.isTextFile(file)) return null;
+    static canCopy(
+        file: CopyFileLike
+    ): boolean {
+        if (
+            file.size >
+            this.MAX_COPY_SIZE
+        ) {
+            return false;
+        }
 
-        const btn = document.createElement("div");
+        // UTF-8 byte length is more accurate than
+        // JavaScript string.length for clipboard limits.
+        try {
+            const bytes =
+                new TextEncoder().encode(
+                    file.content
+                ).byteLength;
 
-        btn.className = "kr-copy-btn";
-        btn.setAttribute("role", "button");
-        btn.tabIndex = 0;
+            return (
+                bytes <=
+                this.MAX_COPY_SIZE
+            );
+        } catch {
+            return (
+                file.content.length <=
+                this.MAX_COPY_SIZE
+            );
+        }
+    }
+
+    /* ---------------------------------------------------------
+       BUTTON
+    --------------------------------------------------------- */
+
+    /**
+     * Creates a copy button for a text file.
+     */
+    static createButton(
+        file: CopyFileLike
+    ): HTMLButtonElement | null {
+        if (!this.isTextFile(file)) {
+            return null;
+        }
+
+        const button =
+            document.createElement("button");
+
+        button.type = "button";
+        button.className = "kr-copy-btn";
 
         let copied = false;
+        let copyTimer:
+            ReturnType<typeof setTimeout> | null =
+                null;
 
-        const update = () => {
-            const disabled = file.size > this.MAX_COPY_SIZE;
+        const update = (): void => {
+            const disabled =
+                !this.canCopy(file);
 
-            btn.textContent = copied ? "✔" : disabled ? "🚫" : "📋";
-            btn.title = disabled
-                ? "File too large to copy"
-                : "Copy File Contents";
+            button.disabled = disabled;
 
-            btn.style.cursor = disabled ? "not-allowed" : "pointer";
-            btn.style.opacity = disabled ? "0.5" : "1";
+            if (copied) {
+                button.textContent = "✔";
+                button.title =
+                    "Copied";
+            } else if (disabled) {
+                button.textContent = "🚫";
+                button.title =
+                    "File too large to copy";
+            } else {
+                button.textContent = "📋";
+                button.title =
+                    "Copy File Contents";
+            }
+
+            button.style.cursor =
+                disabled
+                    ? "not-allowed"
+                    : "pointer";
+
+            button.style.opacity =
+                disabled
+                    ? "0.5"
+                    : "1";
         };
 
-        const doCopy = async () => {
-            if (copied || file.size > this.MAX_COPY_SIZE) return;
+        const doCopy = async (): Promise<void> => {
+            if (
+                button.disabled ||
+                !this.canCopy(file)
+            ) {
+                return;
+            }
 
             try {
-                if (navigator.clipboard?.writeText) {
-                    await navigator.clipboard.writeText(file.content);
-                } else {
-                    // legacy fallback
-                    const anyWindow = window as any;
-                    if (anyWindow.clipboardData?.setData) {
-                        anyWindow.clipboardData.setData("Text", file.content);
-                    } else {
-                        throw new Error("Clipboard API not available");
-                    }
-                }
+                await this.copyText(
+                    file.content
+                );
 
                 copied = true;
                 update();
 
-                this.toast("Copied file contents!");
+                this.toast(
+                    "Copied file contents!"
+                );
 
-                setTimeout(() => {
+                if (copyTimer !== null) {
+                    clearTimeout(copyTimer);
+                }
+
+                copyTimer = setTimeout(() => {
                     copied = false;
+                    copyTimer = null;
                     update();
                 }, 2000);
-            } catch {
-                this.toast("Failed to copy.");
+
+            } catch (error) {
+                console.warn(
+                    "[KrynetCopyFile] Clipboard failed:",
+                    error
+                );
+
+                this.toast(
+                    "Failed to copy."
+                );
             }
         };
 
-        btn.onclick = doCopy;
-
-        // accessibility (keyboard support)
-        btn.onkeydown = (e: KeyboardEvent) => {
-            if (e.key === "Enter" || e.key === " ") {
-                e.preventDefault();
-                doCopy();
+        button.addEventListener(
+            "click",
+            () => {
+                void doCopy();
             }
-        };
+        );
 
         update();
-        return btn;
+
+        return button;
     }
 
+    /* ---------------------------------------------------------
+       CLIPBOARD
+    --------------------------------------------------------- */
+
     /**
-     * Small toast notification system.
+     * Copies text using the modern Clipboard API.
+     *
+     * Falls back to a temporary textarea when the
+     * Clipboard API is unavailable or denied.
      */
-    static toast(msg: string): void {
-        const t = document.createElement("div");
+    private static async copyText(
+        text: string
+    ): Promise<void> {
+        if (
+            navigator.clipboard?.writeText
+        ) {
+            try {
+                await navigator.clipboard.writeText(
+                    text
+                );
 
-        t.className = "kr-toast";
-        t.textContent = msg;
+                return;
+            } catch {
+                // Fall through to textarea fallback.
+            }
+        }
 
-        document.body.appendChild(t);
+        await this.copyTextFallback(text);
+    }
 
-        setTimeout(() => {
-            t.classList.add("fade");
+    /* ---------------------------------------------------------
+       FALLBACK COPY
+    --------------------------------------------------------- */
 
-            setTimeout(() => t.remove(), 300);
-        }, 2000);
+    private static copyTextFallback(
+        text: string
+    ): Promise<void> {
+        return new Promise(
+            (resolve, reject) => {
+                const textarea =
+                    document.createElement(
+                        "textarea"
+                    );
+
+                textarea.value = text;
+
+                Object.assign(
+                    textarea.style,
+                    {
+                        position: "fixed",
+                        left: "-9999px",
+                        top: "0",
+                        width: "1px",
+                        height: "1px",
+                        opacity: "0",
+                        pointerEvents:
+                            "none"
+                    }
+                );
+
+                document.body.appendChild(
+                    textarea
+                );
+
+                textarea.focus();
+                textarea.select();
+
+                let successful = false;
+
+                try {
+                    successful =
+                        document.execCommand(
+                            "copy"
+                        );
+                } catch {
+                    successful = false;
+                }
+
+                textarea.remove();
+
+                if (successful) {
+                    resolve();
+                } else {
+                    reject(
+                        new Error(
+                            "Clipboard API unavailable"
+                        )
+                    );
+                }
+            }
+        );
+    }
+
+    /* ---------------------------------------------------------
+       TOAST
+    --------------------------------------------------------- */
+
+    static toast(
+        message: string
+    ): void {
+        if (!document.body) {
+            return;
+        }
+
+        if (this.toastTimer !== null) {
+            clearTimeout(
+                this.toastTimer
+            );
+
+            this.toastTimer = null;
+        }
+
+        if (this.fadeTimer !== null) {
+            clearTimeout(
+                this.fadeTimer
+            );
+
+            this.fadeTimer = null;
+        }
+
+        let toast =
+            this.toastElement;
+
+        if (!toast) {
+            toast =
+                document.createElement(
+                    "div"
+                );
+
+            toast.className =
+                "kr-toast";
+
+            this.toastElement =
+                toast;
+
+            document.body.appendChild(
+                toast
+            );
+        }
+
+        toast.classList.remove(
+            "fade"
+        );
+
+        toast.textContent =
+            message;
+
+        this.toastTimer =
+            setTimeout(() => {
+                toast?.classList.add(
+                    "fade"
+                );
+
+                this.fadeTimer =
+                    setTimeout(() => {
+                        toast?.remove();
+
+                        if (
+                            this.toastElement ===
+                            toast
+                        ) {
+                            this.toastElement =
+                                null;
+                        }
+
+                        this.fadeTimer =
+                            null;
+                    }, 300);
+
+                this.toastTimer =
+                    null;
+            }, this.TOAST_DURATION);
     }
 }
 
-/* -------------------------
-   GLOBAL EXPORT (optional)
-------------------------- */
+/* -------------------------------------------------------------
+   GLOBAL EXPORT
+------------------------------------------------------------- */
 
 declare global {
     interface Window {
-        KrynetCopyFile?: typeof KrynetCopyFile;
+        KrynetCopyFile?:
+            typeof KrynetCopyFile;
     }
 }
 
-window.KrynetCopyFile = KrynetCopyFile;
+window.KrynetCopyFile =
+    KrynetCopyFile;
+
+export default KrynetCopyFile;
