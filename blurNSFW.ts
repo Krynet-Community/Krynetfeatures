@@ -8,39 +8,67 @@ type ChannelLike = {
 };
 
 class KrynetBlurNSFW {
-    private settings: KrynetNSFWSettings = {
-        blurAmount: 10,
-        enabled: true
-    };
+    private static readonly CSS_VAR =
+        "--kr-nsfw-blur";
 
-    private static readonly CSS_VAR = "--kr-nsfw-blur";
+    private static readonly BLUR_CLASS =
+        "kr-nsfw-blur";
+
+    private settings: KrynetNSFWSettings;
 
     constructor(initialBlur = 10) {
+        this.settings = {
+            blurAmount: 10,
+            enabled: true
+        };
+
         this.setBlur(initialBlur);
     }
 
-    /**
-     * Applies NSFW blur styling to a message element if channel is NSFW.
-     */
-    apply(messageEl: HTMLElement, channel?: ChannelLike): void {
-        if (!messageEl) return;
+    /* ---------------------------------------------------------
+       APPLY
+    --------------------------------------------------------- */
 
-        if (this.settings.enabled && channel?.nsfw) {
-            messageEl.classList.add("kr-nsfw-blur");
-        } else {
-            messageEl.classList.remove("kr-nsfw-blur");
+    /**
+     * Applies or removes NSFW blur from a message element.
+     */
+    apply(
+        messageEl: HTMLElement | null,
+        channel?: ChannelLike
+    ): void {
+        if (!messageEl) {
+            return;
         }
+
+        const shouldBlur =
+            this.settings.enabled === true &&
+            channel?.nsfw === true;
+
+        messageEl.classList.toggle(
+            KrynetBlurNSFW.BLUR_CLASS,
+            shouldBlur
+        );
     }
 
+    /* ---------------------------------------------------------
+       BLUR
+    --------------------------------------------------------- */
+
     /**
-     * Updates blur strength globally via CSS variable.
+     * Updates the global blur amount.
      */
     setBlur(px: number): void {
-        if (!Number.isFinite(px) || px < 0) {
-            throw new Error("Blur amount must be a non-negative number.");
+        if (
+            !Number.isFinite(px) ||
+            px < 0
+        ) {
+            throw new Error(
+                "Blur amount must be a non-negative number."
+            );
         }
 
         this.settings.blurAmount = px;
+
         document.documentElement.style.setProperty(
             KrynetBlurNSFW.CSS_VAR,
             `${px}px`
@@ -48,44 +76,84 @@ class KrynetBlurNSFW {
     }
 
     /**
-     * Enables or disables NSFW blur system.
+     * Returns the current blur amount.
+     */
+    getBlur(): number {
+        return this.settings.blurAmount;
+    }
+
+    /* ---------------------------------------------------------
+       ENABLE / DISABLE
+    --------------------------------------------------------- */
+
+    /**
+     * Enables or disables NSFW blurring.
      */
     toggle(enabled: boolean): void {
-        this.settings.enabled = Boolean(enabled);
+        this.settings.enabled =
+            Boolean(enabled);
     }
 
     /**
-     * Returns current internal settings (read-only copy).
+     * Enables NSFW blurring.
+     */
+    enable(): void {
+        this.toggle(true);
+    }
+
+    /**
+     * Disables NSFW blurring.
+     */
+    disable(): void {
+        this.toggle(false);
+    }
+
+    /**
+     * Returns whether blurring is enabled.
+     */
+    isEnabled(): boolean {
+        return this.settings.enabled;
+    }
+
+    /* ---------------------------------------------------------
+       SETTINGS
+    --------------------------------------------------------- */
+
+    /**
+     * Returns a copy of the current settings.
      */
     getSettings(): Readonly<KrynetNSFWSettings> {
-        return { ...this.settings };
+        return {
+            ...this.settings
+        };
     }
 }
 
-/* -------------------------
-   GLOBAL SAFE EXPORT
-------------------------- */
+/* -------------------------------------------------------------
+   GLOBAL INSTANCE
+------------------------------------------------------------- */
 
-const instance = new KrynetBlurNSFW(10);
+const instance =
+    new KrynetBlurNSFW(10);
 
-/**
- * Optional: attach to window for legacy usage
- */
+/* -------------------------------------------------------------
+   GLOBAL TYPE
+------------------------------------------------------------- */
+
 declare global {
     interface Window {
-        KrynetBlurNSFW?: KrynetBlurNSFW;
+        KrynetNSFW?: KrynetBlurNSFW;
     }
 }
 
-window.KrynetBlurNSFW = instance;
+/* -------------------------------------------------------------
+   GLOBAL EXPORT
+------------------------------------------------------------- */
 
-/* -------------------------
-   INITIAL CSS SETUP
-------------------------- */
+window.KrynetNSFW = instance;
 
-document.documentElement.style.setProperty(
-    "--kr-nsfw-blur",
-    "10px"
-);
+/* -------------------------------------------------------------
+   EXPORT
+------------------------------------------------------------- */
 
 export default instance;
