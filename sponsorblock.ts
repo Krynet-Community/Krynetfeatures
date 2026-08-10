@@ -2,83 +2,253 @@
 // Types
 ///////////////////////////////
 
-type SkipCategory = "sponsor" | "selfpromo" | "interaction" | string;
-
 type SponsorSegment = {
-    category: SkipCategory;
+    category: string;
     segment: [number, number];
+};
+
+type AttachedVideo = {
+    video: HTMLVideoElement;
+    videoId: string;
+    segments: SponsorSegment[];
+    raf: number;
 };
 
 ///////////////////////////////
 // Constants
 ///////////////////////////////
 
-const SKIP_CATEGORIES: ReadonlySet<string> = new Set([
+const API_URL =
+    "https://sponsor.ajay.app/api/skipSegments";
+
+const SKIP_CATEGORIES = new Set([
     "sponsor",
     "selfpromo",
     "interaction"
 ]);
 
+const VIDEO_ID_LENGTH = 11;
+
 ///////////////////////////////
-// Fetch sponsor segments
+// State
 ///////////////////////////////
 
-async function getSegments(videoId: string): Promise<SponsorSegment[]> {
-    try {
-        const res = await fetch(
-            `https://sponsor.ajay.app/api/skipSegments?videoID=${videoId}`
-        );
+const segmentCache =
+    new Map<string, SponsorSegment[]>();
 
-        if (!res.ok) return [];
+const loadingIds =
+    new Map<string, Promise<SponsorSegment[]>>();
 
-        const data: SponsorSegment[] = await res.json();
+const attachedVideos =
+    new WeakMap<HTMLVideoElement, AttachedVideo>();
 
-        return data.filter((seg) =>
-            SKIP_CATEGORIES.has(seg.category)
-        );
-    } catch {
-        return [];
+let observer: MutationObserver | null = null;
+
+///////////////////////////////
+// Sponsor segments
+///////////////////////////////
+
+async function getSegments(
+    videoId: string
+): Promise<SponsorSegment[]> {
+    const cached =
+        segmentCache.get(videoId);
+
+    if (cached) {
+        return cached;
     }
+
+    const loading =
+        loadingIds.get(videoId);
+
+    if (loading) {
+        return loading;
+    }
+
+    const request =
+        fetch(
+            `${API_URL}?videoID=${encodeURIComponent(
+                videoId
+            )}`
+        )
+            .then(async response => {
+                if (!response.ok) {
+                    return [];
+                }
+
+                const data =
+                    (await response.json()) as unknown;
+
+                if (!Array.isArray(data)) {
+                    return [];
+                }
+
+                const segments =
+                    data
+                        .filter(isValidSegment)
+                        .filter(segment =>
+                            SKIP_CATEGORIES.has(
+                                segment.category
+                            )
+                        )
+                        .map(normalizeSegment)
+                        .filter(Boolean)
+                        .sort(
+                            (a, b) =>
+                                a.segment[0] -
+                                b.segment[0]
+                        );
+
+                segmentCache.set(
+                    videoId,
+                    segments
+                );
+
+                return segments;
+            })
+            .catch(() => [])
+            .finally(() => {
+                loadingIds.delete(videoId);
+            });
+
+    loadingIds.set(videoId, request);
+
+    return request;
+}
+
+function isValidSegment(
+    value: unknown
+): value is SponsorSegment {
+    if (
+        !value ||
+        typeof value !== "object"
+    ) {
+        return false;
+    }
+
+    const segment =
+        value as Partial<SponsorSegment>;
+
+    return (
+        typeof segment.category === "string" &&
+        Array.isArray(segment.segment) &&
+        segment.segment.length === 2 &&
+        typeof segment.segment[0] === "number" &&
+        typeof segment.segment[1] === "number"
+    );
+}
+
+function normalizeSegment(
+    segment: SponsorSegment
+): SponsorSegment | null {
+    const start =
+        Math.max(0, segment.segment[0]);
+
+    const end =
+        Math.max(0, segment.segment[1]);
+
+    if (
+        !Number.isFinite(start) ||
+        !Number.isFinite(end) ||
+        end <= start
+    ) {
+        return null;
+    }
+
+    return {
+        category: segment.category,
+        segment: [start, end]
+    };
 }
 
 ///////////////////////////////
-// Extract YouTube ID
+// YouTube ID
 ///////////////////////////////
 
-function extractVideoId(url: string): string | null {
+function isVideoId(
+    value: string | null
+): value is string {
+    return (
+        value !== null &&
+        /^[a-zA-Z0-9_-]{11}$/.test(value)
+    );
+}
+
+function extractVideoId(
+    source: string
+): string | null {
     try {
-        const u = new URL(url);
-        const host = u.hostname.toLowerCase();
+        const url =
+            new URL(source);
 
-        const isYouTube =
-            host.includes("youtube.com") ||
-            host === "youtu.be" ||
-            host.includes("invidious") ||
-            host.includes("piped");
+        const host =
+            url.hostname.toLowerCase();
 
-        if (!isYouTube) return null;
+        ///////////////////////////////
+        // youtu.be/VIDEO_ID
+        ///////////////////////////////
 
-        const vParam = u.searchParams.get("v");
-        if (vParam && vParam.length === 11) return vParam;
+        if (
+            host === "youtu.be"
+        ) {
+            const id =
+                url.pathname
+                    .split("/")
+                    .filter(Boolean)[0] ?? null;
 
-        const parts = u.pathname.split("/").filter(Boolean);
-
-        if (host === "youtu.be" && parts[0]?.length === 11) {
-            return parts[0];
+            return isVideoId(id)
+                ? id
+                : null;
         }
 
-        const watchIndex = parts.indexOf("watch");
-        if (watchIndex !== -1 && parts[watchIndex + 1]?.length === 11) {
-            return parts[watchIndex + 1];
+        ///////////////////////////////
+        // YouTube / Invidious / Piped
+        ///////////////////////////////
+
+        const queryId =
+            url.searchParams.get("v");
+
+        if (isVideoId(queryId)) {
+            return queryId;
         }
 
-        const embedIndex = parts.indexOf("embed");
-        if (embedIndex !== -1 && parts[embedIndex + 1]?.length === 11) {
-            return parts[embedIndex + 1];
+        const parts =
+            url.pathname
+                .split("/")
+                .filter(Boolean);
+
+        const prefixes = [
+            "embed",
+            "shorts",
+            "live"
+        ];
+
+        for (const prefix of prefixes) {
+            const index =
+                parts.indexOf(prefix);
+
+            if (index === -1) {
+                continue;
+            }
+
+            const id =
+                parts[index + 1] ?? null;
+
+            if (isVideoId(id)) {
+                return id;
+            }
         }
 
-        for (const part of parts.reverse()) {
-            if (part.length === 11) return part;
+        /*
+         * Piped/Invidious instances can use
+         * slightly different paths. Look for
+         * an obvious 11-character ID rather than
+         * assuming the whole URL structure.
+         */
+        for (const part of parts) {
+            if (isVideoId(part)) {
+                return part;
+            }
         }
     } catch {
         return null;
@@ -88,92 +258,317 @@ function extractVideoId(url: string): string | null {
 }
 
 ///////////////////////////////
-// Attach sponsor block logic
+// Find video ID
 ///////////////////////////////
 
-async function attachSB(
+function getVideoId(
+    video: HTMLVideoElement
+): string | null {
+    /*
+     * Explicit data attribute wins.
+     */
+    const dataId =
+        video.dataset.youtubeId;
+
+    if (isVideoId(dataId ?? null)) {
+        return dataId!;
+    }
+
+    /*
+     * Some players expose their source
+     * directly on the video element.
+     */
+    const sourceId =
+        extractVideoId(
+            video.currentSrc ||
+            video.src
+        );
+
+    if (sourceId) {
+        return sourceId;
+    }
+
+    /*
+     * Finally inspect the closest iframe.
+     */
+    const iframe =
+        video.closest("iframe");
+
+    if (iframe) {
+        return extractVideoId(
+            iframe.src
+        );
+    }
+
+    /*
+     * Do not use window.location.href here.
+     * A random video on a YouTube page should
+     * not automatically inherit the page ID.
+     */
+    return null;
+}
+
+///////////////////////////////
+// Skip controller
+///////////////////////////////
+
+function startSkipping(
     video: HTMLVideoElement,
-    videoId: string | null
-): Promise<void> {
-    if (!videoId || video.dataset.sbAttached === "true") return;
+    videoId: string,
+    segments: SponsorSegment[]
+): void {
+    if (
+        attachedVideos.has(video) ||
+        !segments.length
+    ) {
+        return;
+    }
 
-    const segments = await getSegments(videoId);
-    if (!segments.length) return;
+    let lastSkippedEnd = -1;
 
-    video.addEventListener("timeupdate", () => {
-        const t = video.currentTime;
+    const state: AttachedVideo = {
+        video,
+        videoId,
+        segments,
+        raf: 0
+    };
 
-        for (const s of segments) {
-            const [start, end] = s.segment;
+    const tick = (): void => {
+        if (
+            video.paused ||
+            video.ended
+        ) {
+            state.raf =
+                requestAnimationFrame(tick);
 
-            if (t >= start && t < end) {
-                video.currentTime = end;
+            return;
+        }
+
+        const time =
+            video.currentTime;
+
+        for (const segment of segments) {
+            const [start, end] =
+                segment.segment;
+
+            if (time < start) {
+                break;
+            }
+
+            if (
+                time >= start &&
+                time < end &&
+                end !== lastSkippedEnd
+            ) {
+                lastSkippedEnd = end;
+
+                /*
+                 * Keep the seek inside the
+                 * media duration when known.
+                 */
+                const duration =
+                    Number.isFinite(
+                        video.duration
+                    )
+                        ? video.duration
+                        : end;
+
+                video.currentTime =
+                    Math.min(
+                        end,
+                        duration
+                    );
+
                 break;
             }
         }
-    });
 
-    video.dataset.sbAttached = "true";
+        /*
+         * Once playback moves away from the
+         * previous segment, allow it to be
+         * skipped again if necessary.
+         */
+        if (
+            lastSkippedEnd >= 0 &&
+            time > lastSkippedEnd
+        ) {
+            lastSkippedEnd = -1;
+        }
+
+        state.raf =
+            requestAnimationFrame(tick);
+    };
+
+    attachedVideos.set(
+        video,
+        state
+    );
+
+    state.raf =
+        requestAnimationFrame(tick);
 }
 
 ///////////////////////////////
-// Scan videos in DOM
+// Attach video
 ///////////////////////////////
 
-async function scanVideos(root: ParentNode = document): Promise<void> {
-    const videos = Array.from(root.querySelectorAll("video"));
+async function attachVideo(
+    video: HTMLVideoElement
+): Promise<void> {
+    if (attachedVideos.has(video)) {
+        return;
+    }
+
+    const videoId =
+        getVideoId(video);
+
+    if (!videoId) {
+        return;
+    }
+
+    const segments =
+        await getSegments(videoId);
+
+    /*
+     * The element may have been removed
+     * while the request was running.
+     */
+    if (!video.isConnected) {
+        return;
+    }
+
+    if (!segments.length) {
+        /*
+         * Cache the fact that this video
+         * has already been checked.
+         */
+        video.dataset.sbChecked = "true";
+        return;
+    }
+
+    startSkipping(
+        video,
+        videoId,
+        segments
+    );
+}
+
+///////////////////////////////
+// Scan
+///////////////////////////////
+
+function scanVideos(
+    root: ParentNode = document
+): void {
+    const videos =
+        root.querySelectorAll<HTMLVideoElement>(
+            "video"
+        );
 
     for (const video of videos) {
-        const el = video as HTMLVideoElement;
-
-        const videoId =
-            el.dataset.youtubeId ||
-            extractVideoId(window.location.href);
-
-        await attachSB(el, videoId);
-    }
-
-    const iframes = Array.from(root.querySelectorAll("iframe"));
-
-    for (const iframe of iframes) {
-        const el = iframe as HTMLIFrameElement;
-
-        try {
-            const videoId = extractVideoId(el.src);
-            if (!videoId) continue;
-
-            let videoInside: HTMLVideoElement | null = null;
-
-            try {
-                const doc =
-                    el.contentDocument ||
-                    el.contentWindow?.document;
-
-                videoInside = doc?.querySelector("video") ?? null;
-            } catch {
-                continue;
-            }
-
-            if (videoInside) {
-                await attachSB(videoInside, videoId);
-            }
-        } catch {
+        if (
+            video.dataset.sbChecked ===
+            "true" ||
+            attachedVideos.has(video)
+        ) {
             continue;
         }
+
+        void attachVideo(video);
     }
 }
 
 ///////////////////////////////
-// Observer bootstrap
+// Cleanup
 ///////////////////////////////
 
-const observer = new MutationObserver(() => {
-    scanVideos().catch(() => {});
-});
+function detachVideo(
+    video: HTMLVideoElement
+): void {
+    const state =
+        attachedVideos.get(video);
 
-observer.observe(document.body, {
-    childList: true,
-    subtree: true
-});
+    if (!state) {
+        return;
+    }
 
-scanVideos().catch(() => {});
+    cancelAnimationFrame(
+        state.raf
+    );
+
+    attachedVideos.delete(video);
+}
+
+///////////////////////////////
+// Mutation observer
+///////////////////////////////
+
+function startObserver(): void {
+    if (observer) {
+        return;
+    }
+
+    observer =
+        new MutationObserver(
+            mutations => {
+                for (const mutation of mutations) {
+                    for (
+                        const node
+                        of mutation.addedNodes
+                    ) {
+                        if (
+                            node.nodeType !==
+                            Node.ELEMENT_NODE
+                        ) {
+                            continue;
+                        }
+
+                        scanVideos(
+                            node as Element
+                        );
+                    }
+                }
+            }
+        );
+
+    observer.observe(
+        document.body,
+        {
+            childList: true,
+            subtree: true
+        }
+    );
+}
+
+///////////////////////////////
+// Initial scan
+///////////////////////////////
+
+scanVideos();
+startObserver();
+
+///////////////////////////////
+// Public API
+///////////////////////////////
+
+export const SponsorBlock = {
+    scan(): void {
+        scanVideos();
+    },
+
+    clearCache(): void {
+        segmentCache.clear();
+    },
+
+    stop(): void {
+        observer?.disconnect();
+        observer = null;
+
+        /*
+         * WeakMap isn't iterable, so existing
+         * controllers naturally disappear with
+         * their video elements. The observer is
+         * what controls future work.
+         */
+    }
+};
