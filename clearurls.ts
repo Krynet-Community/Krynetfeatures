@@ -1,57 +1,226 @@
 (() => {
+    "use strict";
+
+    /* ---------------------------------------------------------
+       CONFIG
+    --------------------------------------------------------- */
+
     const RULES_URL =
         "https://raw.githubusercontent.com/ClearURLs/Rules/master/data.min.json";
 
-    type RuleSet = {
-        name: string;
-        urlPattern: RegExp;
-        rules?: RegExp[];
-        rawRules?: RegExp[];
-        exceptions?: RegExp[];
+    const MESSAGE_SELECTOR =
+        ".message";
+
+    const EDITABLE_SELECTOR =
+        "textarea, [contenteditable='true']";
+
+    const URL_RE =
+        /https?:\/\/[^\s<]+[^<.,:;"'>)\]\s]/gi;
+
+    /* ---------------------------------------------------------
+       TYPES
+    --------------------------------------------------------- */
+
+    type ProviderData = {
+        urlPattern: string;
+        rules?: string[];
+        rawRules?: string[];
+        exceptions?: string[];
     };
 
     type ClearURLsData = {
         providers: Record<
             string,
-            {
-                urlPattern: string;
-                rules?: string[];
-                rawRules?: string[];
-                exceptions?: string[];
-            }
+            ProviderData
         >;
     };
 
+    type RuleSet = {
+        name: string;
+        urlPattern: RegExp;
+        rules: RegExp[];
+        rawRules: RegExp[];
+        exceptions: RegExp[];
+    };
+
+    type MessageElement = HTMLElement & {
+        __clearURLsProcessed?: boolean;
+    };
+
+    type EditableElement =
+        | HTMLTextAreaElement
+        | HTMLElement;
+
+    /* ---------------------------------------------------------
+       STATE
+    --------------------------------------------------------- */
+
     let rules: RuleSet[] = [];
 
-    /* -------------------------
-       LOAD RULES
-    ------------------------- */
+    let rulesLoaded = false;
 
-    async function loadRules(): Promise<void> {
+    let rulesLoading: Promise<void> | null = null;
+
+    let scanTimer:
+        ReturnType<typeof setTimeout> | null = null;
+
+    /* ---------------------------------------------------------
+       REGEX HELPERS
+    --------------------------------------------------------- */
+
+    function createRegex(
+        pattern: string
+    ): RegExp | null {
         try {
-            const res = await fetch(RULES_URL);
-            const data: ClearURLsData = await res.json();
+            return new RegExp(
+                pattern,
+                "i"
+            );
+        } catch (error) {
+            console.warn(
+                "[ClearURLs] Invalid rule:",
+                pattern,
+                error
+            );
 
-            rules = Object.entries(data.providers).map(([name, p]) => ({
-                name,
-                urlPattern: new RegExp(p.urlPattern, "i"),
-                rules: p.rules?.map((r) => new RegExp(r, "i")),
-                rawRules: p.rawRules?.map((r) => new RegExp(r, "i")),
-                exceptions: p.exceptions?.map((r) => new RegExp(r, "i"))
-            }));
-
-            console.log("[ClearURLs] Rules loaded:", rules.length);
-        } catch (e) {
-            console.error("[ClearURLs] Failed to load rules", e);
+            return null;
         }
     }
 
-    /* -------------------------
-       CLEAN URL
-    ------------------------- */
+    function createRegexList(
+        patterns?: string[]
+    ): RegExp[] {
+        if (!patterns) {
+            return [];
+        }
 
-    function cleanUrl(href: string): string {
+        const result: RegExp[] = [];
+
+        for (const pattern of patterns) {
+            const regex =
+                createRegex(pattern);
+
+            if (regex) {
+                result.push(regex);
+            }
+        }
+
+        return result;
+    }
+
+    /* ---------------------------------------------------------
+       LOAD RULES
+    --------------------------------------------------------- */
+
+    async function loadRules(): Promise<void> {
+        if (rulesLoaded) {
+            return;
+        }
+
+        if (rulesLoading) {
+            return rulesLoading;
+        }
+
+        rulesLoading = (async () => {
+            try {
+                const response =
+                    await fetch(RULES_URL, {
+                        cache: "no-cache"
+                    });
+
+                if (!response.ok) {
+                    throw new Error(
+                        `HTTP ${response.status}`
+                    );
+                }
+
+                const data =
+                    await response.json() as ClearURLsData;
+
+                if (
+                    !data?.providers ||
+                    typeof data.providers !== "object"
+                ) {
+                    throw new Error(
+                        "Invalid ClearURLs rules format"
+                    );
+                }
+
+                const loadedRules: RuleSet[] = [];
+
+                for (
+                    const [name, provider]
+                    of Object.entries(data.providers)
+                ) {
+                    const urlPattern =
+                        createRegex(
+                            provider.urlPattern
+                        );
+
+                    if (!urlPattern) {
+                        continue;
+                    }
+
+                    loadedRules.push({
+                        name,
+                        urlPattern,
+                        rules: createRegexList(
+                            provider.rules
+                        ),
+                        rawRules: createRegexList(
+                            provider.rawRules
+                        ),
+                        exceptions:
+                            createRegexList(
+                                provider.exceptions
+                            )
+                    });
+                }
+
+                rules = loadedRules;
+                rulesLoaded = true;
+
+                console.log(
+                    `[ClearURLs] Loaded ${rules.length} providers.`
+                );
+            } catch (error) {
+                console.error(
+                    "[ClearURLs] Failed to load rules:",
+                    error
+                );
+            } finally {
+                rulesLoading = null;
+            }
+        })();
+
+        return rulesLoading;
+    }
+
+    /* ---------------------------------------------------------
+       RESET REGEX
+    --------------------------------------------------------- */
+
+    function resetRegex(
+        regex: RegExp
+    ): void {
+        regex.lastIndex = 0;
+    }
+
+    function regexTest(
+        regex: RegExp,
+        value: string
+    ): boolean {
+        resetRegex(regex);
+        return regex.test(value);
+    }
+
+    /* ---------------------------------------------------------
+       CLEAN URL
+    --------------------------------------------------------- */
+
+    function cleanUrl(
+        href: string
+    ): string {
         let url: URL;
 
         try {
@@ -60,141 +229,394 @@
             return href;
         }
 
-        if (!url.searchParams || !url.searchParams.toString()) {
+        if (!url.search) {
             return href;
         }
 
-        for (const r of rules) {
-            if (!r.urlPattern.test(url.href)) continue;
+        let changed = false;
 
-            if (r.exceptions?.some((ex) => ex.test(url.href))) continue;
+        for (const rule of rules) {
+            if (
+                !regexTest(
+                    rule.urlPattern,
+                    url.href
+                )
+            ) {
+                continue;
+            }
 
-            if (r.rules) {
-                for (const [param] of Array.from(url.searchParams.entries())) {
-                    if (r.rules.some((rx) => rx.test(param))) {
-                        url.searchParams.delete(param);
+            const hasException =
+                rule.exceptions.some(
+                    exception =>
+                        regexTest(
+                            exception,
+                            url.href
+                        )
+                );
+
+            if (hasException) {
+                continue;
+            }
+
+            /* -------------------------------------------------
+               Parameter rules
+            ------------------------------------------------- */
+
+            if (rule.rules.length) {
+                for (
+                    const key
+                    of Array.from(
+                        url.searchParams.keys()
+                    )
+                ) {
+                    const shouldRemove =
+                        rule.rules.some(
+                            regex =>
+                                regexTest(
+                                    regex,
+                                    key
+                                )
+                        );
+
+                    if (!shouldRemove) {
+                        continue;
                     }
+
+                    url.searchParams.delete(key);
+                    changed = true;
                 }
             }
 
-            if (r.rawRules) {
-                let s = url.href;
-                for (const rx of r.rawRules) {
-                    s = s.replace(rx, "");
+            /* -------------------------------------------------
+               Raw URL rules
+            ------------------------------------------------- */
+
+            if (rule.rawRules.length) {
+                let value =
+                    url.toString();
+
+                for (
+                    const regex
+                    of rule.rawRules
+                ) {
+                    const next =
+                        value.replace(
+                            regex,
+                            ""
+                        );
+
+                    if (next !== value) {
+                        changed = true;
+                        value = next;
+                    }
                 }
 
                 try {
-                    url = new URL(s);
+                    url = new URL(value);
                 } catch {
-                    // ignore invalid rebuild
+                    // Keep the last valid URL.
                 }
             }
         }
 
-        return url.toString();
+        return changed
+            ? url.toString()
+            : href;
     }
 
-    /* -------------------------
-       URL MATCHING
-    ------------------------- */
+    /* ---------------------------------------------------------
+       CLEAN TEXT
+    --------------------------------------------------------- */
 
-    const URL_RE =
-        /(https?:\/\/[^\s<]+[^<.,:;"'>)\]\s])/g;
+    function cleanText(
+        text: string
+    ): string {
+        if (
+            !text ||
+            !rules.length
+        ) {
+            return text;
+        }
 
-    function cleanText(text: string): string {
-        return text.replace(URL_RE, cleanUrl);
-    }
-
-    /* -------------------------
-       DOM HELPERS
-    ------------------------- */
-
-    type Editable =
-        | HTMLTextAreaElement
-        | (HTMLElement & { innerText: string });
-
-    function isEditable(el: Element): el is HTMLTextAreaElement | HTMLElement {
-        return (
-            el instanceof HTMLTextAreaElement ||
-            (el instanceof HTMLElement &&
-                el.getAttribute("contenteditable") === "true")
+        return text.replace(
+            URL_RE,
+            match => cleanUrl(match)
         );
     }
 
-    /* -------------------------
-       HOOK SEND / PASTE
-    ------------------------- */
+    /* ---------------------------------------------------------
+       EDITABLE ELEMENTS
+    --------------------------------------------------------- */
 
-    function hookSend(): void {
-        document.addEventListener("submit", (e: SubmitEvent) => {
-            const form = e.target as HTMLFormElement | null;
-            if (!form) return;
+    function isEditable(
+        element: Element | null
+    ): element is EditableElement {
+        if (!element) {
+            return false;
+        }
 
-            const target = form.querySelector<
-                HTMLTextAreaElement | HTMLElement
-            >("textarea, [contenteditable='true']");
+        if (
+            element instanceof
+            HTMLTextAreaElement
+        ) {
+            return true;
+        }
 
-            if (!target) return;
+        return (
+            element instanceof HTMLElement &&
+            element.isContentEditable
+        );
+    }
 
-            if (target instanceof HTMLTextAreaElement) {
-                target.value = cleanText(target.value);
-            } else {
-                target.innerText = cleanText(target.innerText);
+    function cleanEditable(
+        element: EditableElement
+    ): void {
+        if (
+            element instanceof
+            HTMLTextAreaElement
+        ) {
+            const cleaned =
+                cleanText(element.value);
+
+            if (cleaned !== element.value) {
+                element.value = cleaned;
             }
-        });
 
-        document.addEventListener("paste", (e: ClipboardEvent) => {
-            const target = e.target as Element | null;
-            if (!target || !isEditable(target)) return;
+            return;
+        }
 
-            setTimeout(() => {
-                if (target instanceof HTMLTextAreaElement) {
-                    target.value = cleanText(target.value);
-                } else {
-                    target.innerText = cleanText(target.innerText);
+        cleanContentEditable(element);
+    }
+
+    /* ---------------------------------------------------------
+       CONTENTEDITABLE
+    --------------------------------------------------------- */
+
+    function cleanContentEditable(
+        element: HTMLElement
+    ): void {
+        const walker =
+            document.createTreeWalker(
+                element,
+                NodeFilter.SHOW_TEXT
+            );
+
+        const nodes: Text[] = [];
+
+        let node:
+            | Node
+            | null;
+
+        while (
+            (node = walker.nextNode())
+        ) {
+            if (
+                node instanceof Text &&
+                node.nodeValue
+            ) {
+                nodes.push(node);
+            }
+        }
+
+        for (const textNode of nodes) {
+            const original =
+                textNode.nodeValue ?? "";
+
+            const cleaned =
+                cleanText(original);
+
+            if (cleaned !== original) {
+                textNode.nodeValue =
+                    cleaned;
+            }
+        }
+    }
+
+    /* ---------------------------------------------------------
+       SUBMIT
+    --------------------------------------------------------- */
+
+    function hookSubmit(): void {
+        document.addEventListener(
+            "submit",
+            event => {
+                const form =
+                    event.target;
+
+                if (
+                    !(form instanceof
+                    HTMLFormElement)
+                ) {
+                    return;
                 }
-            }, 0);
-        });
+
+                const editable =
+                    form.querySelector<EditableElement>(
+                        EDITABLE_SELECTOR
+                    );
+
+                if (!editable) {
+                    return;
+                }
+
+                cleanEditable(editable);
+            },
+            true
+        );
     }
 
-    /* -------------------------
-       CLEAN RENDERED MESSAGES
-    ------------------------- */
+    /* ---------------------------------------------------------
+       PASTE
+    --------------------------------------------------------- */
 
-    type MessageEl = HTMLElement & {
-        __clearurls?: boolean;
-    };
+    function hookPaste(): void {
+        document.addEventListener(
+            "paste",
+            event => {
+                const target =
+                    event.target;
 
-    const URL_RE_GLOBAL = URL_RE;
+                if (
+                    !(target instanceof
+                    Element)
+                ) {
+                    return;
+                }
 
-    function cleanRendered(): void {
-        document.querySelectorAll<HTMLElement>(".message").forEach((msg) => {
-            const m = msg as MessageEl;
+                if (!isEditable(target)) {
+                    return;
+                }
 
-            if (m.__clearurls) return;
-
-            m.innerHTML = m.innerHTML.replace(URL_RE_GLOBAL, cleanUrl);
-            m.__clearurls = true;
-        });
+                // Let the browser insert the paste first.
+                queueMicrotask(() => {
+                    cleanEditable(target);
+                });
+            }
+        );
     }
 
-    /* -------------------------
-       INIT
-    ------------------------- */
+    /* ---------------------------------------------------------
+       RENDERED MESSAGES
+    --------------------------------------------------------- */
+
+    function cleanMessage(
+        message: MessageElement
+    ): void {
+        if (
+            message.__clearURLsProcessed
+        ) {
+            return;
+        }
+
+        cleanContentEditable(message);
+
+        message.__clearURLsProcessed =
+            true;
+    }
+
+    function cleanRendered(
+        root: ParentNode = document
+    ): void {
+        if (
+            root instanceof HTMLElement &&
+            root.matches(MESSAGE_SELECTOR)
+        ) {
+            cleanMessage(
+                root as MessageElement
+            );
+        }
+
+        root
+            .querySelectorAll<HTMLElement>(
+                MESSAGE_SELECTOR
+            )
+            .forEach(message => {
+                cleanMessage(
+                    message as MessageElement
+                );
+            });
+    }
+
+    /* ---------------------------------------------------------
+       DYNAMIC MESSAGE HANDLING
+    --------------------------------------------------------- */
+
+    function scheduleScan(): void {
+        if (scanTimer !== null) {
+            return;
+        }
+
+        scanTimer = setTimeout(() => {
+            scanTimer = null;
+            cleanRendered();
+        }, 50);
+    }
+
+    const observer =
+        new MutationObserver(
+            mutations => {
+                for (const mutation of mutations) {
+                    if (
+                        mutation.addedNodes.length
+                    ) {
+                        scheduleScan();
+                        return;
+                    }
+                }
+            }
+        );
+
+    /* ---------------------------------------------------------
+       INITIALIZE
+    --------------------------------------------------------- */
 
     async function init(): Promise<void> {
         await loadRules();
 
-        hookSend();
+        if (!rulesLoaded) {
+            console.warn(
+                "[ClearURLs] Running without rules."
+            );
+        }
+
+        hookSubmit();
+        hookPaste();
+
         cleanRendered();
 
-        if (typeof MutationObserver !== "undefined") {
-            new MutationObserver(cleanRendered).observe(document.body, {
+        if (!document.body) {
+            return;
+        }
+
+        observer.observe(
+            document.body,
+            {
                 childList: true,
                 subtree: true
-            });
-        }
+            }
+        );
+
+        console.log(
+            "[ClearURLs] URL cleaning active."
+        );
     }
 
-    init();
+    /* ---------------------------------------------------------
+       START
+    --------------------------------------------------------- */
+
+    if (
+        document.readyState ===
+        "loading"
+    ) {
+        document.addEventListener(
+            "DOMContentLoaded",
+            () => {
+                void init();
+            },
+            { once: true }
+        );
+    } else {
+        void init();
+    }
 })();
