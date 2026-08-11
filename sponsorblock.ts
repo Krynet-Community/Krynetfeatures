@@ -18,117 +18,60 @@ type AttachedVideo = {
 // Constants
 ///////////////////////////////
 
-const API_URL =
-    "https://sponsor.ajay.app/api/skipSegments";
+const API_URL = "https://sponsor.ajay.app/api/skipSegments";
 
-const SKIP_CATEGORIES = new Set([
-    "sponsor",
-    "selfpromo",
-    "interaction"
-]);
-
-const VIDEO_ID_LENGTH = 11;
+const SKIP_CATEGORIES = Object.freeze(
+    new Set(["sponsor", "selfpromo", "interaction"])
+);
 
 ///////////////////////////////
 // State
 ///////////////////////////////
 
-const segmentCache =
-    new Map<string, SponsorSegment[]>();
-
-const loadingIds =
-    new Map<string, Promise<SponsorSegment[]>>();
-
-const attachedVideos =
-    new WeakMap<HTMLVideoElement, AttachedVideo>();
-
+const segmentCache = new Map<string, SponsorSegment[]>();
+const loadingIds = new Map<string, Promise<SponsorSegment[]>>();
+const attachedVideos = new WeakMap<HTMLVideoElement, AttachedVideo>();
 let observer: MutationObserver | null = null;
 
 ///////////////////////////////
 // Sponsor segments
 ///////////////////////////////
 
-async function getSegments(
-    videoId: string
-): Promise<SponsorSegment[]> {
-    const cached =
-        segmentCache.get(videoId);
+async function getSegments(videoId: string): Promise<SponsorSegment[]> {
+    const cached = segmentCache.get(videoId);
+    if (cached) return cached;
 
-    if (cached) {
-        return cached;
-    }
+    const loading = loadingIds.get(videoId);
+    if (loading) return loading;
 
-    const loading =
-        loadingIds.get(videoId);
+    const request = fetch(`${API_URL}?videoID=${encodeURIComponent(videoId)}`)
+        .then(async response => {
+            if (!response.ok) return [];
 
-    if (loading) {
-        return loading;
-    }
+            const data = (await response.json()) as unknown;
+            if (!Array.isArray(data)) return [];
 
-    const request =
-        fetch(
-            `${API_URL}?videoID=${encodeURIComponent(
-                videoId
-            )}`
-        )
-            .then(async response => {
-                if (!response.ok) {
-                    return [];
-                }
+            const segments = data
+                .filter(isValidSegment)
+                .filter(segment => SKIP_CATEGORIES.has(segment.category))
+                .map(normalizeSegment)
+                .filter(Boolean)
+                .sort((a, b) => a.segment[0] - b.segment[0]);
 
-                const data =
-                    (await response.json()) as unknown;
-
-                if (!Array.isArray(data)) {
-                    return [];
-                }
-
-                const segments =
-                    data
-                        .filter(isValidSegment)
-                        .filter(segment =>
-                            SKIP_CATEGORIES.has(
-                                segment.category
-                            )
-                        )
-                        .map(normalizeSegment)
-                        .filter(Boolean)
-                        .sort(
-                            (a, b) =>
-                                a.segment[0] -
-                                b.segment[0]
-                        );
-
-                segmentCache.set(
-                    videoId,
-                    segments
-                );
-
-                return segments;
-            })
-            .catch(() => [])
-            .finally(() => {
-                loadingIds.delete(videoId);
-            });
+            segmentCache.set(videoId, segments);
+            return segments;
+        })
+        .catch(() => [])
+        .finally(() => loadingIds.delete(videoId));
 
     loadingIds.set(videoId, request);
-
     return request;
 }
 
-function isValidSegment(
-    value: unknown
-): value is SponsorSegment {
-    if (
-        !value ||
-        typeof value !== "object"
-    ) {
-        return false;
-    }
+function isValidSegment(value: unknown): value is SponsorSegment {
+    if (!value || typeof value !== "object") return false;
 
-    const segment =
-        value as Partial<SponsorSegment>;
-
+    const segment = value as Partial<SponsorSegment>;
     return (
         typeof segment.category === "string" &&
         Array.isArray(segment.segment) &&
@@ -138,117 +81,54 @@ function isValidSegment(
     );
 }
 
-function normalizeSegment(
-    segment: SponsorSegment
-): SponsorSegment | null {
-    const start =
-        Math.max(0, segment.segment[0]);
+function normalizeSegment(segment: SponsorSegment): SponsorSegment | null {
+    const start = Math.max(0, segment.segment[0]);
+    const end = Math.max(0, segment.segment[1]);
 
-    const end =
-        Math.max(0, segment.segment[1]);
-
-    if (
-        !Number.isFinite(start) ||
-        !Number.isFinite(end) ||
-        end <= start
-    ) {
+    if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) {
         return null;
     }
 
-    return {
-        category: segment.category,
-        segment: [start, end]
-    };
+    return { category: segment.category, segment: [start, end] };
 }
 
 ///////////////////////////////
 // YouTube ID
 ///////////////////////////////
 
-function isVideoId(
-    value: string | null
-): value is string {
-    return (
-        value !== null &&
-        /^[a-zA-Z0-9_-]{11}$/.test(value)
-    );
+function isVideoId(value: string | null): value is string {
+    return value !== null && /^[a-zA-Z0-9_-]{11}$/.test(value);
 }
 
-function extractVideoId(
-    source: string
-): string | null {
+function extractVideoId(source: string): string | null {
     try {
-        const url =
-            new URL(source);
+        const url = new URL(source);
+        const host = url.hostname.toLowerCase();
 
-        const host =
-            url.hostname.toLowerCase();
-
-        ///////////////////////////////
         // youtu.be/VIDEO_ID
-        ///////////////////////////////
-
-        if (
-            host === "youtu.be"
-        ) {
-            const id =
-                url.pathname
-                    .split("/")
-                    .filter(Boolean)[0] ?? null;
-
-            return isVideoId(id)
-                ? id
-                : null;
+        if (host === "youtu.be") {
+            const id = url.pathname.split("/").filter(Boolean)[0] ?? null;
+            return isVideoId(id) ? id : null;
         }
 
-        ///////////////////////////////
         // YouTube / Invidious / Piped
-        ///////////////////////////////
+        const queryId = url.searchParams.get("v");
+        if (isVideoId(queryId)) return queryId;
 
-        const queryId =
-            url.searchParams.get("v");
-
-        if (isVideoId(queryId)) {
-            return queryId;
-        }
-
-        const parts =
-            url.pathname
-                .split("/")
-                .filter(Boolean);
-
-        const prefixes = [
-            "embed",
-            "shorts",
-            "live"
-        ];
+        const parts = url.pathname.split("/").filter(Boolean);
+        const prefixes = ["embed", "shorts", "live"];
 
         for (const prefix of prefixes) {
-            const index =
-                parts.indexOf(prefix);
+            const index = parts.indexOf(prefix);
+            if (index === -1) continue;
 
-            if (index === -1) {
-                continue;
-            }
-
-            const id =
-                parts[index + 1] ?? null;
-
-            if (isVideoId(id)) {
-                return id;
-            }
+            const id = parts[index + 1] ?? null;
+            if (isVideoId(id)) return id;
         }
 
-        /*
-         * Piped/Invidious instances can use
-         * slightly different paths. Look for
-         * an obvious 11-character ID rather than
-         * assuming the whole URL structure.
-         */
+        // Piped/Invidious: look for 11-char ID in path
         for (const part of parts) {
-            if (isVideoId(part)) {
-                return part;
-            }
+            if (isVideoId(part)) return part;
         }
     } catch {
         return null;
